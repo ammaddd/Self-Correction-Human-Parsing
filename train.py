@@ -16,7 +16,7 @@ import json
 import timeit
 import argparse
 
-from comet_ml import Experiment
+from utils.comet_utils import CometLogger
 import torch
 import torch.optim as optim
 import torchvision.transforms as transforms
@@ -67,15 +67,16 @@ def get_arguments():
     parser.add_argument("--lambda-s", type=float, default=1, help='segmentation loss weight')
     parser.add_argument("--lambda-e", type=float, default=1, help='edge loss weight')
     parser.add_argument("--lambda-c", type=float, default=0.1, help='segmentation-edge consistency loss weight')
+    parser.add_argument('--comet', type=bool, default=False, help='enable comet logging (if comet installed)')
     return parser.parse_args()
 
 
 def main():
     args = get_arguments()
     print(args)
-    experiment = Experiment(auto_metric_logging=False)
-    experiment.log_others(vars(args))
-    experiment.log_code("./datasets/datasets.py")
+    comet_logger = CometLogger(args.comet, auto_metric_logging=False)
+    comet_logger.log_others(vars(args))
+    comet_logger.log_code("./datasets/datasets.py")
 
     start_epoch = 0
     cycle_n = 0
@@ -167,7 +168,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         lr_scheduler.step(epoch=epoch)
         lr = lr_scheduler.get_lr()[0]
-        experiment.log_metric("lr", lr, epoch=epoch)
+        comet_logger.log_metric("lr", lr, epoch=epoch)
 
         model.train()
         for i_iter, batch in enumerate(train_loader):
@@ -177,9 +178,9 @@ def main():
             labels = labels.cuda(non_blocking=True)
 
             if i_iter % 100 == 0:
-                experiment.log_image(images[0].detach().cpu().numpy()[::-1, :, :],
-                                     name="train_images",
-                                     image_channels="first", step=i_iter)
+                comet_logger.log_image(images[0].detach().cpu().numpy()[::-1, :, :],
+                                       name="train_images",
+                                       image_channels="first", step=i_iter)
 
             edges = generate_edge_tensor(labels)
             labels = labels.type(torch.cuda.LongTensor)
@@ -207,8 +208,8 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            experiment.log_metric("train_loss", loss.item(), step=i_iter,
-                                  epoch=epoch)
+            comet_logger.log_metric("train_loss", loss.item(), step=i_iter,
+                                    epoch=epoch)
 
             if i_iter % 100 == 0:
                 print('iter = {} of {} completed, lr = {}, loss = {}'.format(i_iter, total_iters, lr,
@@ -219,7 +220,7 @@ def main():
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
             }, False, args.log_dir, filename='checkpoint_{}.pth.tar'.format(epoch + 1))
-            experiment.log_model("parsing_model", path)
+            comet_logger.log_model("parsing_model", path)
 
         # Self Correction Cycle with Model Aggregation
         if (epoch + 1) >= args.schp_start and (epoch + 1 - args.schp_start) % args.cycle_epochs == 0:
@@ -232,7 +233,7 @@ def main():
                 'state_dict': schp_model.state_dict(),
                 'cycle_n': cycle_n,
             }, False, args.log_dir, filename='schp_{}_checkpoint.pth.tar'.format(cycle_n))
-            experiment.log_model("parsing_model", path)
+            comet_logger.log_model("parsing_model", path)
 
         torch.cuda.empty_cache()
         end = timeit.default_timer()
