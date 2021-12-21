@@ -16,6 +16,7 @@ import json
 import timeit
 import argparse
 
+from utils.comet_utils import CometLogger
 import torch
 import torch.optim as optim
 import torchvision.transforms as transforms
@@ -66,12 +67,16 @@ def get_arguments():
     parser.add_argument("--lambda-s", type=float, default=1, help='segmentation loss weight')
     parser.add_argument("--lambda-e", type=float, default=1, help='edge loss weight')
     parser.add_argument("--lambda-c", type=float, default=0.1, help='segmentation-edge consistency loss weight')
+    parser.add_argument('--comet', type=bool, default=False, help='enable comet logging (if comet installed)')
     return parser.parse_args()
 
 
 def main():
     args = get_arguments()
     print(args)
+    comet_logger = CometLogger(args.comet, auto_metric_logging=False)
+    comet_logger.log_others(vars(args))
+    comet_logger.log_code("./datasets/datasets.py")
 
     start_epoch = 0
     cycle_n = 0
@@ -163,6 +168,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         lr_scheduler.step(epoch=epoch)
         lr = lr_scheduler.get_lr()[0]
+        comet_logger.log_metric("lr", lr, epoch=epoch)
 
         model.train()
         for i_iter, batch in enumerate(train_loader):
@@ -170,6 +176,11 @@ def main():
 
             images, labels, _ = batch
             labels = labels.cuda(non_blocking=True)
+
+            if i_iter % 100 == 0:
+                comet_logger.log_image(images[0].detach().cpu().numpy()[::-1, :, :],
+                                       name="train_images",
+                                       image_channels="first", step=i_iter)
 
             edges = generate_edge_tensor(labels)
             labels = labels.type(torch.cuda.LongTensor)
@@ -197,18 +208,23 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            comet_logger.log_metric("train_loss", loss.item(), step=i_iter,
+                                    epoch=epoch)
 
             if i_iter % 100 == 0:
                 print('iter = {} of {} completed, lr = {}, loss = {}'.format(i_iter, total_iters, lr,
                                                                              loss.data.cpu().numpy()))
         if (epoch + 1) % (args.eval_epochs) == 0:
+            path = os.path.join(args.log_dir, 'checkpoint_{}.pth.tar'.format(epoch + 1))
             schp.save_schp_checkpoint({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
             }, False, args.log_dir, filename='checkpoint_{}.pth.tar'.format(epoch + 1))
+            comet_logger.log_model("parsing_model", path)
 
         # Self Correction Cycle with Model Aggregation
         if (epoch + 1) >= args.schp_start and (epoch + 1 - args.schp_start) % args.cycle_epochs == 0:
+            path = os.path.join(args.log_dir, 'schp_{}_checkpoint.pth.tar'.format(cycle_n))
             print('Self-correction cycle number {}'.format(cycle_n))
             schp.moving_average(schp_model, model, 1.0 / (cycle_n + 1))
             cycle_n += 1
@@ -217,6 +233,7 @@ def main():
                 'state_dict': schp_model.state_dict(),
                 'cycle_n': cycle_n,
             }, False, args.log_dir, filename='schp_{}_checkpoint.pth.tar'.format(cycle_n))
+            comet_logger.log_model("parsing_model", path)
 
         torch.cuda.empty_cache()
         end = timeit.default_timer()
